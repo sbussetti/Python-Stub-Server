@@ -1,5 +1,7 @@
 import threading, time
 import SocketServer
+import re
+import os
 
 class FTPServer(SocketServer.BaseRequestHandler):
    
@@ -7,6 +9,7 @@ class FTPServer(SocketServer.BaseRequestHandler):
         self.port = port
         self.interactions = interactions
         self.files = files
+        self.cwd = ''
    
     def __call__(self, request, client_address, server):
         self.request = request
@@ -18,7 +21,7 @@ class FTPServer(SocketServer.BaseRequestHandler):
         finally:
            self.finish()
         return self
-   
+
     def handle(self):
         # Establish connection
         self.request.send('220 (FtpStubServer 0.1a)\r\n')
@@ -27,19 +30,25 @@ class FTPServer(SocketServer.BaseRequestHandler):
             cmd = self.request.recv(1024)
             if cmd:
                 self.interactions.append(cmd)
-                getattr(self, '_' + cmd[:4])(cmd)
-   
+                (attr, ) = re.findall(r'^([^\s]+)\s', cmd) 
+                getattr(self, '_' + attr)(cmd)
+
     def _USER(self, cmd):
         self.request.send('331 Please specify password.\r\n')
-   
+
     def _PASS(self, cmd):
         self.request.send('230 You are now logged in.\r\n')
-   
+
     def _TYPE(self, cmd):
         self.request.send('200 Switching to ascii mode.\r\n')
-   
+
+    def _CWD(self, cmd):
+        (path, ) = re.findall(re.compile(r'^CWD\s(.*?)[\r\n]+$', re.S), cmd)
+        self.cwd = path
+        self.request.send('250 OK. Current directory is %s\r\n' % path)
+
     def _PASV(self, cmd):
-        self.data_handler = FTPDataServer(self.interactions, self.files)
+        self.data_handler = FTPDataServer(self.interactions, self.files, self.cwd)
         def start_data_server():
             self.port = self.port + 1
             data_server = SocketServer.TCPServer(('localhost',self.port + 1), self.data_handler)
@@ -55,7 +64,7 @@ class FTPServer(SocketServer.BaseRequestHandler):
         time.sleep(0.2)
         self.request.send('226 Got the file\r\n')
         self.t2.join(1)
-        
+
     def _LIST(self, cmd):
         self.request.send('150 Accepted data connection\r\n')
         time.sleep(0.2)
@@ -75,10 +84,11 @@ class FTPServer(SocketServer.BaseRequestHandler):
 
 class FTPDataServer(SocketServer.StreamRequestHandler):
     
-    def __init__(self, interactions, files):
+    def __init__(self, interactions, files, cwd):
         self.interactions = interactions
         self.files = files
         self.command = 'LIST'
+        self.cwd = cwd
             
     def __call__(self, request, client_address, server):
         self.request = request
@@ -98,10 +108,11 @@ class FTPDataServer(SocketServer.StreamRequestHandler):
         
     def filename(self):
         return self.interactions[-1:][0][5:].strip()
-        
+
     def _STOR(self):
-        self.files[self.filename()] = self.rfile.read().strip()
-        
+        abspath=os.path.join(self.cwd, self.filename())
+        self.files[abspath] = self.rfile.read().strip()
+
     def _LIST(self):
         self.wfile.write('\n'.join([name for name in self.files.keys()]))
         
